@@ -1,4 +1,3 @@
-// app/bookings/page.tsx
 'use client';
 
 import { useEffect, useState } from 'react';
@@ -12,7 +11,7 @@ import {
   getDoc,
 } from 'firebase/firestore';
 import { db, auth } from '@/lib/firebase';
-import { onAuthStateChanged } from 'firebase/auth';
+import { onAuthStateChanged, User } from 'firebase/auth';
 import ProtectedRoute from '@/components/ProtectedRoute';
 
 interface Booking {
@@ -29,29 +28,38 @@ interface Booking {
 
 export default function MyBookings() {
   const [bookings, setBookings] = useState<Booking[]>([]);
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = useState<Booking | null>(null);
 
+  // Auth State Listener
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
+      if (!currentUser) setLoading(false);
     });
     return () => unsubscribe();
   }, []);
 
+  // Fetch Bookings
   useEffect(() => {
     if (!user) return;
 
+    let isMounted = true;
     const fetchBookings = async () => {
       setLoading(true);
       try {
         const q = query(collection(db, 'bookings'), where('userId', '==', user.uid));
         const snap = await getDocs(q);
+        
+        if (!isMounted) return;
+
         const list: Booking[] = [];
-        snap.docs.forEach((doc) => {
-          const data = doc.data();
+        snap.docs.forEach((docSnap) => {
+          const data = docSnap.data();
+          
+          // Basic validation for required fields
           if (
             data.from &&
             data.to &&
@@ -61,7 +69,7 @@ export default function MyBookings() {
             data.status
           ) {
             list.push({
-              id: doc.id,
+              id: docSnap.id,
               routeId: data.routeId,
               from: data.from,
               to: data.to,
@@ -73,45 +81,58 @@ export default function MyBookings() {
             });
           }
         });
+
+        // Sort by date (Newest first)
         list.sort((a, b) => {
           const timeA = a.bookedAt instanceof Date ? a.bookedAt.getTime() : a.bookedAt.seconds * 1000;
           const timeB = b.bookedAt instanceof Date ? b.bookedAt.getTime() : b.bookedAt.seconds * 1000;
           return timeB - timeA;
         });
+
         setBookings(list);
       } catch (err) {
-        console.error(err);
+        console.error("Error fetching bookings:", err);
       } finally {
-        setLoading(false);
+        if (isMounted) setLoading(false);
       }
     };
 
     fetchBookings();
+
+    return () => {
+      isMounted = false;
+    };
   }, [user]);
 
+  // Handle Booking Cancellation
   const handleCancel = async () => {
     if (!confirmCancel) return;
 
-    setCancellingId(confirmCancel.id);
+    const targetId = confirmCancel.id;
+    setCancellingId(targetId);
     setConfirmCancel(null);
 
     try {
       const batch = writeBatch(db);
-      batch.update(doc(db, 'bookings', confirmCancel.id), { status: 'cancelled' });
+      
+      // 1. Update Booking Status
+      batch.update(doc(db, 'bookings', targetId), { status: 'cancelled' });
 
+      // 2. Increment Route Seat Count
       const routeRef = doc(db, 'routes', confirmCancel.routeId);
       const routeSnap = await getDoc(routeRef);
+      
       if (routeSnap.exists()) {
         const currentSeats = routeSnap.data().seats || 0;
         batch.update(routeRef, { seats: currentSeats + 1 });
       }
 
+      // Commit transaction batch
       await batch.commit();
 
+      // Update local state smoothly
       setBookings((prev) =>
-        prev.map((b) =>
-          b.id === confirmCancel.id ? { ...b, status: 'cancelled' } : b
-        )
+        prev.map((b) => (b.id === targetId ? { ...b, status: 'cancelled' } : b))
       );
     } catch (err) {
       alert('Cancellation failed. Please try again.');
@@ -136,6 +157,7 @@ export default function MyBookings() {
     <ProtectedRoute>
       <div className="min-h-screen bg-white py-8 px-4">
         <div className="max-w-4xl mx-auto animate-fade-in">
+          
           {/* Header */}
           <div className="text-center mb-10">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-500 text-white mb-4 shadow-lg animate-bounce">
@@ -144,9 +166,7 @@ export default function MyBookings() {
               </svg>
             </div>
             <h1 className="text-4xl md:text-5xl font-bold text-gray-800 mb-3">My Bookings</h1>
-            <p className="text-gray-600 text-lg">
-              Manage your bus tickets
-            </p>
+            <p className="text-gray-600 text-lg">Manage your bus tickets</p>
           </div>
 
           {/* Bookings List */}
@@ -171,9 +191,7 @@ export default function MyBookings() {
                 >
                   {/* Status Badge */}
                   <div className={`px-4 py-1.5 transition-all duration-300 ${
-                    booking.status === 'confirmed'
-                      ? 'bg-blue-500'
-                      : 'bg-gray-500'
+                    booking.status === 'confirmed' ? 'bg-blue-500' : 'bg-gray-500'
                   }`}>
                     <div className="flex items-center justify-between">
                       <span className="text-white font-semibold text-xs flex items-center gap-1.5">
@@ -224,7 +242,7 @@ export default function MyBookings() {
 
                   {/* Cancel Button */}
                   {booking.status === 'confirmed' && (
-                    <div className="mt-3 pt-3 border-t border-gray-200 flex justify-end">
+                    <div className="mt-3 pt-3 border-t border-gray-200 flex justify-end px-4 pb-3">
                       <button
                         onClick={() => setConfirmCancel(booking)}
                         disabled={cancellingId === booking.id}
@@ -247,48 +265,4 @@ export default function MyBookings() {
         {/* Cancel Confirmation Modal */}
         {confirmCancel && (
           <div className="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl border-2 border-gray-200 transition-all">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center transition-all hover:scale-105">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                  </svg>
-                </div>
-                <div>
-                  <h3 className="text-xl font-bold text-gray-900">Cancel Booking?</h3>
-                  <p className="text-sm text-gray-500">This action cannot be undone</p>
-                </div>
-              </div>
-
-              <div className="bg-gray-50 rounded-xl p-4 mb-6 transition-all">
-                <p className="text-gray-700 mb-3">Are you sure you want to cancel your ticket?</p>
-                <div className="flex items-center gap-2 text-gray-900 font-semibold">
-                  <span className="text-blue-500">{confirmCancel.from}</span>
-                  <span>➡️</span>
-                  <span className="text-blue-500">{confirmCancel.to}</span>
-                </div>
-                <p className="text-sm text-gray-600 mt-2">Departure: {confirmCancel.departure}</p>
-                {confirmCancel.transmission && <p className="text-sm text-gray-600 mt-1">Transmission: {confirmCancel.transmission}</p>}
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setConfirmCancel(null)}
-                  className="flex-1 py-3 border-2 border-gray-300 rounded-xl text-gray-800 font-semibold hover:bg-gray-100 transition-all transform hover:scale-105"
-                >
-                  Go Back
-                </button>
-                <button
-                  onClick={() => handleCancel()}
-                  className="flex-1 py-3 bg-blue-500 text-white rounded-xl font-semibold hover:bg-blue-600 transition-all transform hover:scale-105 shadow-lg"
-                >
-                  Yes, Cancel
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    </ProtectedRoute>
-  );
-}
+            <div className="bg-white rounded-2xl p-6 max-w-md w-full
